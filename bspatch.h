@@ -4,7 +4,7 @@
  * All rights reserved
  *
  * Redistribution and use in source and binary forms, with or without
- * modification, are permitted providing that the following conditions 
+ * modification, are permitted providing that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
@@ -26,17 +26,17 @@
  */
 
 #ifndef BSPATCH_H
-# define BSPATCH_H
+#define BSPATCH_H
 
-# include <stdint.h>
+#include <stdint.h>
 
 struct bspatch_stream
 {
-	void* opaque;
-	int (*read)(const struct bspatch_stream* stream, void* buffer, int length);
+	void *opaque;
+	int (*read)(const struct bspatch_stream *stream, void *buffer, int length);
 };
 
-int bspatch(const uint8_t* old, int64_t oldsize, uint8_t* new, int64_t newsize, struct bspatch_stream* stream);
+int bspatch(const uint8_t *old, int64_t oldsize, uint8_t *new, int64_t newsize,
+	struct bspatch_stream *stream);
 
 #endif
-
