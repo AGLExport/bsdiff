@@ -22,11 +22,11 @@
 # POSSIBILITY OF SUCH DAMAGE.
 #
 
-EXTRA_DIST += $(libbsdiff_srcpath)/bsdiff.h $(libbsdiff_srcpath)/bspatch.h $(libbsdiff_srcpath)/patchio.h $(libbsdiff_srcpath)/LICENSE $(libbsdiff_srcpath)/README.md
+EXTRA_DIST += $(libbsdiff_srcpath)/bsdiff.h $(libbsdiff_srcpath)/bspatch.h $(libbsdiff_srcpath)/patchio.h $(libbsdiff_srcpath)/patchio-private.h $(libbsdiff_srcpath)/LICENSE $(libbsdiff_srcpath)/README.md
 
 libbsdiff_la_SOURCES = \
-	$(libbsdiff_srcpath)/bsdiff.c \
-	$(libbsdiff_srcpath)/bspatch.c \
+	$(libbsdiff_srcpath)/bsdiff-imp.c \
+	$(libbsdiff_srcpath)/bspatch-imp.c \
 	$(libbsdiff_srcpath)/patchio.c \
 	$(NULL)
 
