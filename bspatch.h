@@ -29,14 +29,20 @@
 #define BSPATCH_H
 
 #include <stdint.h>
+#include "patchio.h"
 
+/* Reads and writes must transfer exactly length bytes; zero means success.
+ * old_read is called only for offsets within the declared old file size. */
 struct bspatch_stream
 {
 	void *opaque;
-	int (*read)(const struct bspatch_stream *stream, void *buffer, int length);
+	int (*read)(struct bspatch_stream *stream, int channel, void *buffer, int length);
+	int (*old_read)(struct bspatch_stream *stream, int64_t offset, void *buffer, int length);
+	int (*write)(struct bspatch_stream *stream, const void *buffer, int length);
 };
 
-int bspatch(const uint8_t *old, int64_t oldsize, uint8_t *new, int64_t newsize,
-	struct bspatch_stream *stream);
+int bspatch(int64_t oldsize, int64_t newsize, struct bspatch_stream *stream);
+int bspatch_files(
+	const char *oldpath, const char *newpath, const char *prefix, const char *unpackdir);
 
 #endif

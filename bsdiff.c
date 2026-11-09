@@ -28,6 +28,7 @@
 #include "bsdiff.h"
 
 #include <limits.h>
+#include <stddef.h>
 #include <string.h>
 
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
@@ -261,23 +262,22 @@ static void offtout(int64_t x, uint8_t *buf)
 	}
 }
 
-static int64_t writedata(struct bsdiff_stream *stream, const void *buffer, int64_t length)
+static int writedata(struct bsdiff_stream *stream, int channel, const void *buffer, int64_t length)
 {
-	int64_t result = 0;
+	const uint8_t *data = buffer;
+	int result;
+	int chunk;
 
 	while (length > 0) {
-		const int smallsize = (int)MIN(length, INT_MAX);
-		const int writeresult = stream->write(stream, buffer, smallsize);
-		if (writeresult == -1) {
+		chunk = (int)MIN(length, PATCH_BUFFER_SIZE);
+		result = stream->write(stream, channel, data, chunk);
+		if (result != 0) {
 			return -1;
 		}
-
-		result += writeresult;
-		length -= smallsize;
-		buffer = (uint8_t *)buffer + smallsize;
+		data += chunk;
+		length -= chunk;
 	}
-
-	return result;
+	return 0;
 }
 
 struct bsdiff_request
@@ -302,7 +302,8 @@ static int bsdiff_internal(const struct bsdiff_request req)
 	int64_t i;
 	uint8_t *buffer;
 	uint8_t buf[8 * 3];
-	int64_t write_result;
+	int write_result;
+	int64_t offset, chunk, extra;
 
 	V = req.stream->malloc((req.oldsize + 1) * sizeof(int64_t));
 	if (V == NULL) {
@@ -330,7 +331,7 @@ static int bsdiff_internal(const struct bsdiff_request req)
 				I, req.old, req.oldsize, req.new + scan, req.newsize - scan, 0, req.oldsize, &pos);
 
 			for (; scsc < scan + len; scsc++) {
-				if ((scsc + lastoffset < req.oldsize) &&
+				if ((scsc + lastoffset >= 0) && (scsc + lastoffset < req.oldsize) &&
 					(req.old[scsc + lastoffset] == req.new[scsc])) {
 					oldscore++;
 				}
@@ -340,7 +341,7 @@ static int bsdiff_internal(const struct bsdiff_request req)
 				break;
 			}
 
-			if ((scan + lastoffset < req.oldsize) &&
+			if ((scan + lastoffset >= 0) && (scan + lastoffset < req.oldsize) &&
 				(req.old[scan + lastoffset] == req.new[scan])) {
 				oldscore--;
 			}
@@ -404,25 +405,24 @@ static int bsdiff_internal(const struct bsdiff_request req)
 			offtout((pos - lenb) - (lastpos + lenf), buf + 16);
 
 			/* Write control data */
-			write_result = writedata(req.stream, buf, sizeof(buf));
+			write_result = writedata(req.stream, PATCH_CTRL, buf, sizeof(buf));
 			if (write_result != 0) {
 				return -1;
 			}
 
-			/* Write diff data */
-			for (i = 0; i < lenf; i++) {
-				buffer[i] = req.new[lastscan + i] - req.old[lastpos + i];
+			/* Calculate diff in bounded chunks; extra comes directly from new. */
+			for (offset = 0; offset < lenf; offset += chunk) {
+				chunk = MIN(lenf - offset, PATCH_BUFFER_SIZE);
+				for (i = 0; i < chunk; i++) {
+					buffer[i] = req.new[lastscan + offset + i] - req.old[lastpos + offset + i];
+				}
+				write_result = writedata(req.stream, PATCH_DIFF, buffer, chunk);
+				if (write_result != 0) {
+					return -1;
+				}
 			}
-			write_result = writedata(req.stream, buffer, lenf);
-			if (write_result != 0) {
-				return -1;
-			}
-
-			/* Write extra data */
-			for (i = 0; i < (scan - lenb) - (lastscan + lenf); i++) {
-				buffer[i] = req.new[lastscan + lenf + i];
-			}
-			write_result = writedata(req.stream, buffer, (scan - lenb) - (lastscan + lenf));
+			extra = (scan - lenb) - (lastscan + lenf);
+			write_result = writedata(req.stream, PATCH_EXTRA, req.new + lastscan + lenf, extra);
 			if (write_result != 0) {
 				return -1;
 			}
@@ -442,12 +442,20 @@ int bsdiff(const uint8_t *old, int64_t oldsize, const uint8_t *new, int64_t news
 	int result;
 	struct bsdiff_request req;
 
+	/* The sorter doubles lengths and scores; reserve signed arithmetic headroom. */
+	if (oldsize < 0 || newsize < 0 || oldsize > (INT64_MAX - 1) / 2 ||
+		newsize > (INT64_MAX - 1) / 2 || (uint64_t)oldsize > SIZE_MAX / sizeof(int64_t) - 1 ||
+		(uint64_t)newsize > SIZE_MAX || stream == NULL || stream->malloc == NULL ||
+		stream->free == NULL || stream->write == NULL || old == NULL || new == NULL) {
+		return -1;
+	}
+
 	req.I = stream->malloc((oldsize + 1) * sizeof(int64_t));
 	if (req.I == NULL) {
 		return -1;
 	}
 
-	req.buffer = stream->malloc(newsize + 1);
+	req.buffer = stream->malloc(PATCH_BUFFER_SIZE);
 	if (req.buffer == NULL) {
 		stream->free(req.I);
 		return -1;
@@ -468,151 +476,21 @@ int bsdiff(const uint8_t *old, int64_t oldsize, const uint8_t *new, int64_t news
 }
 
 #if defined(BSDIFF_EXECUTABLE)
-
-#include <sys/types.h>
-
-#include <bzlib.h>
-#include <err.h>
-#include <fcntl.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-
-static int bz2_write(struct bsdiff_stream *stream, const void *buffer, int size)
-{
-	int bz2err;
-	BZFILE *bz2;
-
-	bz2 = (BZFILE *)stream->opaque;
-	BZ2_bzWrite(&bz2err, bz2, (void *)buffer, size);
-	if (bz2err != BZ_STREAM_END && bz2err != BZ_OK) {
-		return -1;
-	}
-
-	return 0;
-}
 
 int main(int argc, char *argv[])
 {
-	int fd;
 	int result;
-	off_t seek_result;
-	ssize_t io_result;
-	size_t file_result;
-	int bz2err;
-	uint8_t *old, *new;
-	off_t oldsize, newsize;
-	uint8_t buf[8];
-	FILE *pf;
-	struct bsdiff_stream stream;
-	BZFILE *bz2;
-
-	memset(&bz2, 0, sizeof(bz2));
-	stream.malloc = malloc;
-	stream.free = free;
-	stream.write = bz2_write;
 
 	if (argc != 4) {
-		errx(1, "usage: %s oldfile newfile patchfile\n", argv[0]);
+		fprintf(stderr, "usage: %s oldfile newfile prefix\n", argv[0]);
+		return 1;
 	}
-
-	/* Allocate oldsize+1 bytes instead of oldsize bytes to ensure
-		that we never try to malloc(0) and get a NULL pointer */
-	fd = open(argv[1], O_RDONLY, 0);
-	if (fd < 0) {
-		err(1, "%s", argv[1]);
-	}
-	oldsize = lseek(fd, 0, SEEK_END);
-	if (oldsize == -1) {
-		err(1, "%s", argv[1]);
-	}
-	old = malloc(oldsize + 1);
-	if (old == NULL) {
-		err(1, "%s", argv[1]);
-	}
-	seek_result = lseek(fd, 0, SEEK_SET);
-	if (seek_result != 0) {
-		err(1, "%s", argv[1]);
-	}
-	io_result = read(fd, old, oldsize);
-	if (io_result != oldsize) {
-		err(1, "%s", argv[1]);
-	}
-	result = close(fd);
-	if (result == -1) {
-		err(1, "%s", argv[1]);
-	}
-
-	/* Allocate newsize+1 bytes instead of newsize bytes to ensure
-		that we never try to malloc(0) and get a NULL pointer */
-	fd = open(argv[2], O_RDONLY, 0);
-	if (fd < 0) {
-		err(1, "%s", argv[2]);
-	}
-	newsize = lseek(fd, 0, SEEK_END);
-	if (newsize == -1) {
-		err(1, "%s", argv[2]);
-	}
-	new = malloc(newsize + 1);
-	if (new == NULL) {
-		err(1, "%s", argv[2]);
-	}
-	seek_result = lseek(fd, 0, SEEK_SET);
-	if (seek_result != 0) {
-		err(1, "%s", argv[2]);
-	}
-	io_result = read(fd, new, newsize);
-	if (io_result != newsize) {
-		err(1, "%s", argv[2]);
-	}
-	result = close(fd);
-	if (result == -1) {
-		err(1, "%s", argv[2]);
-	}
-
-	/* Create the patch file */
-	pf = fopen(argv[3], "w");
-	if (pf == NULL) {
-		err(1, "%s", argv[3]);
-	}
-
-	/* Write header (signature+newsize)*/
-	offtout(newsize, buf);
-	file_result = fwrite("ENDSLEY/BSDIFF43", 16, 1, pf);
-	if (file_result != 1) {
-		err(1, "Failed to write header");
-	}
-	file_result = fwrite(buf, sizeof(buf), 1, pf);
-	if (file_result != 1) {
-		err(1, "Failed to write header");
-	}
-
-	bz2 = BZ2_bzWriteOpen(&bz2err, pf, 9, 0, 0);
-	if (bz2 == NULL) {
-		errx(1, "BZ2_bzWriteOpen, bz2err=%d", bz2err);
-	}
-
-	stream.opaque = bz2;
-	result = bsdiff(old, oldsize, new, newsize, &stream);
+	result = bsdiff_files(argv[1], argv[2], argv[3]);
 	if (result != 0) {
-		err(1, "bsdiff");
+		fprintf(stderr, "bsdiff: patch generation failed\n");
+		return 1;
 	}
-
-	BZ2_bzWriteClose(&bz2err, bz2, 0, NULL, NULL);
-	if (bz2err != BZ_OK) {
-		err(1, "BZ2_bzWriteClose, bz2err=%d", bz2err);
-	}
-
-	result = fclose(pf);
-	if (result != 0) {
-		err(1, "fclose");
-	}
-
-	/* Free the memory we used */
-	free(old);
-	free(new);
-
 	return 0;
 }
-
 #endif
